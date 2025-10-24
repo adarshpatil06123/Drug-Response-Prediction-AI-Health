@@ -1324,12 +1324,18 @@ export default function PredictorForm() {
                     Fetching real-time drug information...
                   </span>
                 ) : (
-                  <div 
-                    className="explanation-content" 
-                    dangerouslySetInnerHTML={{ 
-                      __html: formatExplanationText(prediction.explanation || 'Loading detailed explanation...', prediction.drugName || formData.medicineName) 
-                    }} 
-                  />
+                  prediction.explanation ? (
+                    <div className="explanation-content" style={{ whiteSpace: 'pre-wrap' }}>
+                      {prediction.explanation}
+                    </div>
+                  ) : (
+                    <div 
+                      className="explanation-content" 
+                      dangerouslySetInnerHTML={{ 
+                        __html: formatExplanationText('Loading detailed explanation...', prediction.drugName || formData.medicineName) 
+                      }} 
+                    />
+                  )
                 )}
               </div>
             </div>
