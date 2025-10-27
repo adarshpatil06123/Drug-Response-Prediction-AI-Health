@@ -1,9 +1,13 @@
 'use client';
 
 import { useState, useMemo, useEffect } from 'react';
+import axios from 'axios';
 
 // API Configuration - Use environment variable for production deployment
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+
+// PubChem autocomplete validation URL
+const PUBCHEM_VALIDATION_URL = 'https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/Compound/query/';
 
 interface PredictionResult {
   prediction: string;
@@ -81,6 +85,7 @@ export default function PredictorForm() {
   const [apiStatus, setApiStatus] = useState<'checking' | 'connected' | 'disconnected'>('checking');
   const [systemStatus, setSystemStatus] = useState<any>(null);
   const [responseTime, setResponseTime] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   // Check API status and system status on component mount
   useEffect(() => {
@@ -170,6 +175,26 @@ export default function PredictorForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+
+    // Pre-submit validation against PubChem autocomplete for exact match
+    try {
+      const drugName = formData.medicineName.trim();
+      const url = `${PUBCHEM_VALIDATION_URL}${encodeURIComponent(drugName)}/json?dict=compound&limit=1`;
+      const validationResp = await axios.get(url, { timeout: 5000 });
+      const suggestions: string[] = validationResp.data?.dictionary_terms?.compound || [];
+      const exactMatch = suggestions.some((s) => s.toLowerCase() === drugName.toLowerCase());
+      if (!exactMatch) {
+        setError(`Medicine Not Found: The term "${drugName}" is not recognized in primary medical databases. Please check spelling.`);
+        setLoading(false);
+        return;
+      }
+    } catch (e) {
+      // On validation API error, fail closed with user-friendly message
+      const dn = formData.medicineName.trim();
+      setError(`Medicine Not Found: The term "${dn}" is not recognized in primary medical databases. Please check spelling.`);
+      setLoading(false);
+      return;
+    }
     
     const startTime = Date.now();
     
@@ -998,6 +1023,12 @@ export default function PredictorForm() {
           <div className="form-header">
             <h1 className="form-title">Patient Data Input</h1>
             <p className="form-subtitle">Enter patient details to predict drug response with our AI.</p>
+
+            {error && (
+              <div className="mt-3 text-sm text-red-800 bg-red-100 border border-red-200 rounded px-3 py-2">
+                {error}
+              </div>
+            )}
             
             {/* API Status Indicator */}
             <div className="mt-3 flex items-center justify-center gap-2 text-sm">
