@@ -86,6 +86,7 @@ export default function PredictorForm() {
   const [systemStatus, setSystemStatus] = useState<any>(null);
   const [responseTime, setResponseTime] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [drugValidation, setDrugValidation] = useState<'idle' | 'checking' | 'valid' | 'invalid'>('idle');
 
   // Check API status and system status on component mount
   useEffect(() => {
@@ -161,6 +162,10 @@ export default function PredictorForm() {
       ...prev,
       [name]: value
     }));
+    if (name === 'medicineName') {
+      setDrugValidation('idle');
+      setError(null);
+    }
   };
 
   const handleAgeChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -172,26 +177,46 @@ export default function PredictorForm() {
     }));
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setLoading(true);
-
-    // Pre-submit validation against PubChem autocomplete for exact match
+  const validateDrugName = async (rawName: string): Promise<boolean> => {
     try {
-      const drugName = formData.medicineName.trim();
+      const drugName = (rawName || '').trim();
+      if (!drugName) {
+        setError('Medicine name is required');
+        setDrugValidation('invalid');
+        return false;
+      }
+      setDrugValidation('checking');
       const url = `${PUBCHEM_VALIDATION_URL}${encodeURIComponent(drugName)}/json?dict=compound&limit=1`;
       const validationResp = await axios.get(url, { timeout: 5000 });
       const suggestions: string[] = validationResp.data?.dictionary_terms?.compound || [];
       const exactMatch = suggestions.some((s) => s.toLowerCase() === drugName.toLowerCase());
       if (!exactMatch) {
         setError(`Medicine Not Found: The term "${drugName}" is not recognized in primary medical databases. Please check spelling.`);
+        setDrugValidation('invalid');
+        return false;
+      }
+      setError(null);
+      setDrugValidation('valid');
+      return true;
+    } catch (err) {
+      setError('Unable to validate medicine name right now. Please check the spelling or try again later.');
+      setDrugValidation('invalid');
+      return false;
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoading(true);
+
+    // Pre-submit validation against PubChem autocomplete for exact match
+    try {
+      const ok = await validateDrugName(formData.medicineName);
+      if (!ok) {
         setLoading(false);
         return;
       }
     } catch (e) {
-      // On validation API error, fail closed with user-friendly message
-      const dn = formData.medicineName.trim();
-      setError(`Medicine Not Found: The term "${dn}" is not recognized in primary medical databases. Please check spelling.`);
       setLoading(false);
       return;
     }
@@ -1064,10 +1089,20 @@ export default function PredictorForm() {
                   name="medicineName"
                   value={formData.medicineName}
                   onChange={handleInputChange}
+                  onBlur={async () => { await validateDrugName(formData.medicineName); }}
                   placeholder="e.g., Paracetamol"
                   className="form-input"
                   required
                 />
+                {drugValidation === 'checking' && (
+                  <div className="text-xs text-gray-600 mt-1">Validating medicine name…</div>
+                )}
+                {drugValidation === 'valid' && (
+                  <div className="text-xs text-green-700 mt-1">Medicine found ✓</div>
+                )}
+                {drugValidation === 'invalid' && (
+                  <div className="text-xs text-red-700 mt-1">Not found in primary databases</div>
+                )}
               </div>
             </div>
 
@@ -1174,9 +1209,9 @@ export default function PredictorForm() {
             </div>
 
             {/* Submit Button */}
-            <button
+              <button
               type="submit"
-              disabled={loading}
+              disabled={loading || drugValidation === 'invalid'}
               className="submit-btn"
               style={{backgroundColor: '#1ABC9C'}}
             >
