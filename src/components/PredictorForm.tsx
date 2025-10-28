@@ -1,10 +1,24 @@
 'use client';
 
 import { useState, useMemo, useEffect } from 'react';
-import axios from 'axios';
 
 // API Configuration - Use environment variable for production deployment
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+
+// Small helper for JSON fetch with timeout
+const getJson = async <T = any>(url: string, timeout = 6000): Promise<T | null> => {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  try {
+    const res = await fetch(url, { signal: controller.signal, headers: { 'Accept': 'application/json' } });
+    if (!res.ok) return null;
+    return (await res.json()) as T;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(id);
+  }
+};
 
 // PubChem autocomplete validation URL
 const PUBCHEM_VALIDATION_URL = 'https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/Compound/query/';
@@ -85,8 +99,9 @@ export default function PredictorForm() {
   const [apiStatus, setApiStatus] = useState<'checking' | 'connected' | 'disconnected'>('checking');
   const [systemStatus, setSystemStatus] = useState<any>(null);
   const [responseTime, setResponseTime] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [, setError] = useState<string | null>(null);
   const [drugValidation, setDrugValidation] = useState<'idle' | 'checking' | 'valid' | 'invalid'>('idle');
+  const [showUsedMore, setShowUsedMore] = useState(false);
 
   // Check API status and system status on component mount
   useEffect(() => {
@@ -107,8 +122,6 @@ export default function PredictorForm() {
         
         if (response.ok) {
           const data = await response.json();
-          console.log('🟢 API Health Check SUCCESS:', data);
-          console.log('🚀 Real-time API is AVAILABLE and READY');
           setApiStatus('connected');
           
           // Also fetch system status
@@ -117,7 +130,6 @@ export default function PredictorForm() {
             if (statusResponse.ok) {
               const statusData = await statusResponse.json();
               setSystemStatus(statusData);
-              console.log('System Status:', statusData);
             }
           } catch (statusError) {
             console.log('System status check failed:', statusError);
@@ -128,7 +140,6 @@ export default function PredictorForm() {
       } catch (error) {
         const endTime = Date.now();
         setResponseTime(endTime - startTime);
-        console.log('API Health Check Failed:', error);
         setApiStatus('disconnected');
       }
     };
@@ -178,28 +189,48 @@ export default function PredictorForm() {
   };
 
   const validateDrugName = async (rawName: string): Promise<boolean> => {
+    const normalize = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     try {
       const drugName = (rawName || '').trim();
       if (!drugName) {
-        setError('Medicine name is required');
-        setDrugValidation('invalid');
+        setError(null);
+        setDrugValidation('idle');
         return false;
       }
       setDrugValidation('checking');
-      const url = `${PUBCHEM_VALIDATION_URL}${encodeURIComponent(drugName)}/json?dict=compound&limit=1`;
-      const validationResp = await axios.get(url, { timeout: 5000 });
-      const suggestions: string[] = validationResp.data?.dictionary_terms?.compound || [];
-      const exactMatch = suggestions.some((s) => s.toLowerCase() === drugName.toLowerCase());
-      if (!exactMatch) {
-        setError(`Medicine Not Found: The term "${drugName}" is not recognized in primary medical databases. Please check spelling.`);
-        setDrugValidation('invalid');
-        return false;
-      }
-      setError(null);
-      setDrugValidation('valid');
-      return true;
-    } catch (err) {
-      setError('Unable to validate medicine name right now. Please check the spelling or try again later.');
+
+      // 1) PubChem autocomplete (wider limit, normalized compare)
+      try {
+        const url = `${PUBCHEM_VALIDATION_URL}${encodeURIComponent(drugName)}/json?dict=compound&limit=10`;
+        const resp = await getJson<any>(url, 6000);
+        const list: string[] = resp?.dictionary_terms?.compound || [];
+        const ok = list.some((s) => normalize(s) === normalize(drugName));
+        if (ok) {
+          setError(null);
+          setDrugValidation('valid');
+          return true;
+        }
+      } catch {}
+
+      // 2) RxNorm spelling suggestions as fallback
+      try {
+        const rxUrl = `https://rxnav.nlm.nih.gov/REST/spellingsuggestions.json?name=${encodeURIComponent(drugName)}`;
+        const rx = await getJson<any>(rxUrl, 6000);
+        const sugg: string[] = rx?.suggestionGroup?.suggestionList?.suggestion || [];
+        const ok2 = sugg.some((s) => normalize(s) === normalize(drugName));
+        if (ok2) {
+          setError(null);
+          setDrugValidation('valid');
+          return true;
+        }
+      } catch {}
+
+      // No match in either source
+      setError(null); // suppress banner text per UX request
+      setDrugValidation('invalid');
+      return false;
+    } catch {
+      setError(null); // suppress banner text per UX request
       setDrugValidation('invalid');
       return false;
     }
@@ -241,9 +272,6 @@ export default function PredictorForm() {
         throw new Error('Valid age between 1 and 120 is required');
       }
 
-      console.log('🚀 Starting REAL-TIME prediction for:', formData.medicineName);
-      console.log('📊 Form data validation passed:', formData);
-      console.log('📊 Age being sent:', formData.age, typeof formData.age);
       
       // Generate unique patient ID
       const patientId = `patient_${Date.now()}`;
@@ -259,8 +287,6 @@ export default function PredictorForm() {
         chronic_conditions: formData.chronicConditions || 'None'
       };
 
-      console.log('Trying enhanced API with data:', enhancedData);
-      console.log('Enhanced API age:', enhancedData.age, typeof enhancedData.age);
 
       let response = await fetch(`${API_BASE_URL}/predict/enhanced`, {
         method: 'POST',
@@ -273,17 +299,12 @@ export default function PredictorForm() {
       let result;
       let isEnhanced = false;
 
-      console.log('Enhanced API response status:', response.status, response.ok);
 
       if (response.ok) {
         result = await response.json();
         isEnhanced = true;
-        console.log('✅ SUCCESS: Enhanced API Response:', result);
-        console.log('✅ Using REAL-TIME AI with Enhanced Analysis');
       } else {
         // Fall back to standard API
-        console.log('❌ Enhanced API failed, trying standard API...');
-        console.log('Enhanced API error:', response.status, response.statusText);
         
         const standardData = {
           patient_age: Number(formData.age),
@@ -294,8 +315,6 @@ export default function PredictorForm() {
           drug_name: formData.medicineName
         };
 
-        console.log('Trying standard API with data:', standardData);
-        console.log('Standard API age:', standardData.patient_age, typeof standardData.patient_age);
 
         response = await fetch(`${API_BASE_URL}/predict`, {
           method: 'POST',
@@ -307,11 +326,7 @@ export default function PredictorForm() {
 
         if (response.ok) {
           result = await response.json();
-          console.log('✅ SUCCESS: Standard API Response:', result);
-          console.log('✅ Using REAL-TIME AI with Standard Analysis');
         } else {
-          console.log('❌ Both APIs failed!');
-          console.log('Standard API error:', response.status, response.statusText);
         }
       }
 
@@ -319,8 +334,6 @@ export default function PredictorForm() {
       const predictionTime = endTime - startTime;
 
       if (response.ok && result) {
-        console.log(`🚀 REAL-TIME PREDICTION COMPLETED in ${predictionTime}ms using ${isEnhanced ? 'ENHANCED' : 'STANDARD'} API`);
-        console.log('📊 Prediction Result:', result);
         
         // Map API response to frontend format
         const mappedResult = isEnhanced ? 
@@ -335,30 +348,23 @@ export default function PredictorForm() {
           );
           mappedResult.explanation = detailedExplanation;
         } else {
-          console.log('✅ Using API-generated explanation:', mappedResult.explanation);
         }
         
-        console.log('✅ DISPLAYING REAL-TIME RESULTS');
-        console.log('🔍 Final prediction object:', mappedResult);
-        console.log('🔍 isRealAI flag:', mappedResult.isRealAI);
-        console.log('🔍 isEnhanced flag:', mappedResult.isEnhanced);
+        setShowUsedMore(false);
         setPrediction(mappedResult);
         setApiStatus('connected');
       } else {
         throw new Error('Both APIs failed');
       }
     } catch (error) {
-      console.error('❌ PREDICTION ERROR:', error);
       
       // Check if it's a validation error
       if (error instanceof Error && error.message.includes('required')) {
-        console.error('⚠️ VALIDATION ERROR:', error.message);
         alert(`Validation Error: ${error.message}`);
         setLoading(false);
         return;
       }
       
-      console.error('❌ ALL REAL-TIME APIs FAILED:', error);
       alert('Unable to connect to AI prediction service. Please check your internet connection and try again.');
       setApiStatus('disconnected');
     } finally {
@@ -490,21 +496,14 @@ export default function PredictorForm() {
       explanationHtml += `${drugInfo.category} commonly prescribed for ${drugInfo.uses}. `;
     }
     
-    // Extract mechanism of action from the text
-    const mechanismMatch = text.match(/(?:How it works|Mechanism of Action).*?:\s*(.*?)(?=\*\*|$)/s);
-    if (mechanismMatch) {
-      const mechanism = mechanismMatch[1].trim();
-      if (mechanism && mechanism.length > 10) {
-        explanationHtml += `<br/><br/><strong>How it works:</strong> ${mechanism}`;
-      }
-    }
+    // Removed "How it works" section per product requirements
     
     // Extract indications/uses from the text
     const usesMatch = text.match(/(?:How it helps|Indications).*?:\s*(.*?)(?=\*\*|$)/s);
     if (usesMatch) {
       const indications = usesMatch[1].trim();
       if (indications && indications.length > 10) {
-        explanationHtml += `<br/><br/><strong>Used to treat:</strong> ${indications.substring(0, 200)}${indications.length > 200 ? '...' : ''}`;
+                        explanationHtml += `<br/><br/><strong>Used to treat:</strong> ${indications}`;
       }
     }
     
@@ -513,7 +512,7 @@ export default function PredictorForm() {
     if (formulaMatch) {
       const formula = formulaMatch[1].trim();
       if (formula) {
-        explanationHtml += `<br/><br/><strong>Chemical Formula:</strong> <span style="font-family: monospace;">${formula}</span>`;
+        // Removed Chemical Formula display per product requirements
       }
     }
     
@@ -522,7 +521,7 @@ export default function PredictorForm() {
     if (safetyMatch) {
       const safety = safetyMatch[1].trim();
       if (safety && safety.length > 10) {
-        explanationHtml += `<br/><br/><strong>Safety:</strong> <span style="color: #059669;">${safety}</span>`;
+        explanationHtml += `<br/><br/><strong>Safety:</strong> ${safety}`;
       }
     }
     
@@ -538,6 +537,121 @@ export default function PredictorForm() {
     return explanationHtml;
   };
 
+  // Plain-text sanitizer for explanation
+  const toPlainExplanation = (text: string): string => {
+    return (text || '')
+      .replace(/\*\*/g, '') // remove bold markers
+      .replace(/__+/g, '') // remove underscores if any
+      .replace(/<[^>]+>/g, '') // strip HTML
+      .replace(/\r\n/g, '\n')
+      .replace(/\s+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  };
+
+  // Remove leading FDA-style section headers like "1 INDICATIONS AND USAGE"
+  const stripLeadingSectionHeader = (text: string): string => {
+    if (!text) return '';
+    let out = text.trim();
+    // Common FDA headers at the start of a block
+    out = out.replace(/^\s*(?:\d+(?:\.\d+)*)?\s*(INDICATIONS(?: AND USAGE)?|INDICATION|USAGE)\s*:?\s*/i, '');
+    return out.trim();
+  };
+
+  // Produce a concise 4–5 sentence summary for end users
+  const conciseSummary = (text: string, maxSentences: number = 5, maxChars: number = 800): string => {
+    if (!text) return '';
+    const t = text.replace(/\r/g, ' ').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+    const sentences = t.split(/(?<=[.!?])\s+/).filter(Boolean);
+    let out = sentences.slice(0, maxSentences).join(' ');
+    if (out.length > maxChars) out = out.slice(0, maxChars).trim();
+    return out;
+  };
+
+  // Build end-user concise block with: Header + Used to treat (first sentence + rest) + Important + Safety + Recommendation
+  const buildConciseExplanation = (
+    raw: string
+  ): { headerDrug: string; headerTail: string; usedFirst: string; usedRest: string; important: string; safety: string; recommendation: string } => {
+    const parsed = parseExplanationSections(raw);
+    const candidate = parsed.sections['Used to treat'] || parsed.sections['Indications'] || parsed.overview || raw;
+    const cleaned = stripLeadingSectionHeader(toPlainExplanation(candidate));
+    const parts = cleaned.split(/(?<=[.!?])\s+/).filter(Boolean);
+    const usedFirst = (parts[0] || cleaned).trim();
+    const usedRest = parts.slice(1).join(' ').trim();
+
+    const drugLabel = (prediction?.drugName || formData.medicineName || 'This medicine').trim();
+    const drugUpper = drugLabel.toUpperCase();
+
+    // Try to extract molecular info if present in raw text
+    const formulaMatch = raw.match(/molecular\s+formula[:\-]?\s*([A-Za-z0-9]+)\b/i);
+    const weightMatch = raw.match(/molecular\s+weight[:\-]?\s*([0-9]+(?:\.[0-9]+)?)\b/i);
+    let headerTail = `${drugLabel} is a medicine.`;
+    if (formulaMatch || weightMatch) {
+      const f = formulaMatch ? formulaMatch[1] : undefined;
+      const w = weightMatch ? weightMatch[1] : undefined;
+      if (f && w) headerTail = `${drugLabel} is a chemical compound with molecular formula ${f} and molecular weight ${w}.`;
+      else if (f) headerTail = `${drugLabel} is a chemical compound with molecular formula ${f}.`;
+      else if (w) headerTail = `${drugLabel} is a chemical compound with molecular weight ${w}.`;
+    }
+
+    const conf = prediction?.medicineSuitability?.overall_suitability?.confidence ?? (prediction?.confidence || 0.0);
+    const confPct = Math.max(0, Math.min(100, Math.round(conf * 100)));
+
+    let safetyPhrase = 'appears safe and effective';
+    const p = (prediction?.prediction || '').toLowerCase();
+    if (p.includes('risk')) safetyPhrase = 'may be risky for this patient';
+    else if (p.includes('ineffective')) safetyPhrase = 'is unlikely to be effective';
+
+    const safety = `${drugLabel} ${safetyPhrase} for this patient (${confPct}% confidence).`;
+
+    const recBase = prediction?.medicineSuitability?.overall_suitability?.recommendation ||
+      (p.includes('risk')
+        ? 'Consider alternatives or consult your doctor for a safer option.'
+        : p.includes('ineffective')
+          ? 'Consider alternatives; discuss dosing or other treatments with your doctor.'
+          : 'This medication appears suitable for your condition based on your health profile.');
+
+    const recommendation = `${recBase} Follow your doctor's prescribed dosing schedule and monitor for any side effects.`;
+
+    return {
+      headerDrug: drugUpper,
+      headerTail,
+      usedFirst: usedFirst || `${drugLabel} is used for therapeutic treatment based on medical guidance.`,
+      usedRest,
+      important: 'Monitor for adverse reactions',
+      safety,
+      recommendation,
+    };
+  };
+
+  // Parse plain explanation into structured sections with labels
+  const parseExplanationSections = (raw: string) => {
+    const text = toPlainExplanation(raw);
+    const labels = ['Used to treat', 'Important', 'Safety Assessment', 'Note', 'Recommendation'];
+    const regex = /(Used to treat|Important|Safety Assessment|Note|Recommendation):/gi;
+    let title = '';
+    let body = text;
+    const titleMatch = text.match(/^([A-Z0-9 \-]{3,}?):\s*(.*)$/);
+    if (titleMatch) {
+      title = titleMatch[1].trim();
+      body = titleMatch[2].trim();
+    }
+    const parts: { key: string; start: number; end: number; len: number }[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(body))) {
+      parts.push({ key: m[1].replace(/\s+/g, ' '), start: m.index, end: -1, len: m[0].length });
+    }
+    for (let i = 0; i < parts.length; i++) {
+      parts[i].end = i + 1 < parts.length ? parts[i + 1].start : body.length;
+    }
+    const overview = parts.length ? body.slice(0, parts[0].start).trim() : body.trim();
+    const sections: Record<string, string> = {};
+    for (const p of parts) {
+      sections[p.key] = body.slice(p.start + p.len, p.end).trim();
+    }
+    return { title, overview, sections, labels };
+  };
+
   // Function to fetch real-time drug information from multiple sources
   const fetchRealTimeDrugInfo = async (drugName: string) => {
     try {
@@ -548,7 +662,6 @@ export default function PredictorForm() {
         return data.data;
       }
     } catch (error) {
-      console.log('Backend drug info not available:', error);
     }
 
     // Fallback to direct API calls
@@ -556,7 +669,6 @@ export default function PredictorForm() {
       const drugInfo = await fetchDirectDrugAPIs(drugName);
       return drugInfo;
     } catch (error) {
-      console.log('Direct API calls failed:', error);
     }
 
     return null;
@@ -578,7 +690,6 @@ export default function PredictorForm() {
         drugInfo.sources.push('RxNorm');
       }
     } catch (error) {
-      console.log('RxNorm API failed:', error);
     }
 
     try {
@@ -589,7 +700,6 @@ export default function PredictorForm() {
         drugInfo.sources.push('FDA');
       }
     } catch (error) {
-      console.log('FDA API failed:', error);
     }
 
     try {
@@ -600,7 +710,6 @@ export default function PredictorForm() {
         drugInfo.sources.push('PubChem');
       }
     } catch (error) {
-      console.log('PubChem API failed:', error);
     }
 
     return drugInfo.sources.length > 0 ? drugInfo : null;
@@ -639,7 +748,6 @@ export default function PredictorForm() {
         }
       }
     } catch (error) {
-      console.log('RxNorm fetch error:', error);
     }
     return null;
   };
@@ -673,7 +781,6 @@ export default function PredictorForm() {
         }
       }
     } catch (error) {
-      console.log('FDA fetch error:', error);
     }
     return null;
   };
@@ -705,7 +812,6 @@ export default function PredictorForm() {
         }
       }
     } catch (error) {
-      console.log('PubChem fetch error:', error);
     }
     return null;
   };
@@ -905,9 +1011,6 @@ export default function PredictorForm() {
     
     // Prioritize real-time drug information over static data
     if (realTimeInfo && realTimeInfo.real_time_data) {
-      console.log('🔄 Using REAL-TIME drug data for:', drugName);
-      console.log('📊 Real-time sources:', realTimeInfo.sources);
-      console.log('🔍 Full real-time data:', realTimeInfo);
       
       // Use FDA data if available (most comprehensive)
       if (realTimeInfo.fda && realTimeInfo.fda.found) {
@@ -949,7 +1052,6 @@ export default function PredictorForm() {
     }
     // Use static database as last resort
     else if (!medicineInfo) {
-      console.log('⚠️ Using static database for:', drugName);
       const categoryInfo = getCategorySpecificInfo(drugInfo.category);
       medicineInfo = {
         uses: `${drugName} is a ${drugInfo.category} medication used for ${drugInfo.uses}.`,
@@ -1088,15 +1190,6 @@ export default function PredictorForm() {
                   className="form-input"
                   required
                 />
-                {drugValidation === 'checking' && (
-                  <div className="text-xs text-gray-600 mt-1">Validating medicine name…</div>
-                )}
-                {drugValidation === 'valid' && (
-                  <div className="text-xs text-green-700 mt-1">Medicine found ✓</div>
-                )}
-                {drugValidation === 'invalid' && (
-                  <div className="text-xs text-red-700 mt-1">Not found in primary databases</div>
-                )}
               </div>
             </div>
 
@@ -1376,26 +1469,59 @@ export default function PredictorForm() {
             <div className="prediction-card-header">
               <h3 className="prediction-card-title">Explanation</h3>
             </div>
-            <div className="prediction-card-content">
-              <div style={{fontSize: '0.875rem', lineHeight: '1.5', color: 'var(--text-dark)', margin: 0}}>
+              <div className="prediction-card-content">
+              <div style={{fontSize: '0.95rem', lineHeight: 1.8, color: '#000', margin: 0}}>
                 {loadingDrugInfo ? (
                   <span className="flex items-center">
-                    <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-blue-600 mr-2"></div>
+                    <div className="animate-spin rounded-full h-3 w-3 border-b-2 border-gray-700 mr-2"></div>
                     Fetching real-time drug information...
                   </span>
                 ) : (
-                  prediction.explanation ? (
-                    <div className="explanation-content" style={{ whiteSpace: 'pre-wrap' }}>
-                      {prediction.explanation}
-                    </div>
-                  ) : (
-                    <div 
-                      className="explanation-content" 
-                      dangerouslySetInnerHTML={{ 
-                        __html: formatExplanationText('Loading detailed explanation...', prediction.drugName || formData.medicineName) 
-                      }} 
-                    />
-                  )
+                  (() => {
+                    const raw = prediction.explanation ||
+                      formatExplanationText('Loading detailed explanation...', (prediction.drugName || formData.medicineName));
+                    const { headerDrug, headerTail, usedFirst, usedRest, important, safety, recommendation } = buildConciseExplanation(raw);
+                    const hasMore = !!usedRest;
+                    return (
+                      <div className="explanation-content" style={{ whiteSpace: 'pre-wrap', color: '#000' }}>
+                        <p className="ex-para" style={{marginTop: 0, marginBottom: 12}}><strong>{headerDrug}</strong>: {headerTail}</p>
+                        <p className="ex-para" style={{marginTop: 0, marginBottom: 10}}>
+                          <strong>Used to treat:</strong> {usedFirst}
+                          {hasMore && !showUsedMore && (
+                            <>
+                              {' '}<button
+                                type="button"
+                                aria-label="Read more"
+                                aria-expanded={false}
+                                className="inline-flex items-center text-sm font-semibold text-blue-600 hover:text-blue-700 hover:underline ml-2 cursor-pointer focus:outline-none focus:ring-0"
+                                style={{ background: 'transparent', border: 'none', padding: 0 }}
+                                onClick={() => setShowUsedMore(true)}
+                              >
+                                Read More
+                              </button>
+                            </>
+                          )}
+                          {hasMore && showUsedMore && (
+                            <>
+                              {' '}{usedRest} {' '}<button
+                                type="button"
+                                aria-label="Show less"
+                                aria-expanded={true}
+                                className="inline-flex items-center text-sm font-semibold text-blue-600 hover:text-blue-700 hover:underline ml-2 cursor-pointer focus:outline-none focus:ring-0"
+                                style={{ background: 'transparent', border: 'none', padding: 0 }}
+                                onClick={() => setShowUsedMore(false)}
+                              >
+                                Show Less
+                              </button>
+                            </>
+                          )}
+                        </p>
+                        <p className="ex-para" style={{marginTop: 0, marginBottom: 8}}><strong>Important:</strong> {important}</p>
+                        <p className="ex-para" style={{marginTop: 0, marginBottom: 8}}><strong>Safety Assessment:</strong> {safety}</p>
+                        <p className="ex-para" style={{marginTop: 0, marginBottom: 0}}><strong>Recommendation:</strong> {recommendation}</p>
+                      </div>
+                    );
+                  })()
                 )}
               </div>
             </div>
